@@ -17,6 +17,7 @@ HTTP를 통해 실시간 MJPEG 스트림으로 제공합니다.
   CAM_HEIGHT      캡처 세로 해상도        (기본: 720)
   CAM_BUFFERS     V4L2 mmap 버퍼 개수    (기본: 4)
   CAM_QUALITY     JPEG 인코딩 품질 0~100 (기본: 80)
+  CAM_TARGET_FPS  목표 프레임 레이트      (기본: 30)
   SERVER_HOST     바인딩 호스트           (기본: 0.0.0.0)
   SERVER_PORT     바인딩 포트             (기본: 8000)
 
@@ -28,6 +29,7 @@ HTTP를 통해 실시간 MJPEG 스트림으로 제공합니다.
 import asyncio
 import logging
 import os
+import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -54,6 +56,7 @@ CAM_WIDTH   = int(os.getenv("CAM_WIDTH",   "1280"))
 CAM_HEIGHT  = int(os.getenv("CAM_HEIGHT",  "720"))
 CAM_BUFFERS = int(os.getenv("CAM_BUFFERS", "4"))
 CAM_QUALITY = int(os.getenv("CAM_QUALITY", "80"))
+CAM_TARGET_FPS = int(os.getenv("CAM_TARGET_FPS", "30"))
 SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
 
@@ -104,14 +107,23 @@ MJPEG_BOUNDARY = b"--frame"
 
 async def _mjpeg_generator() -> AsyncGenerator[bytes, None]:
     """
-    비동기 MJPEG 프레임 제너레이터.
+    비동기 MJPEG 프레임 제너레이터 (Target FPS 기반 레이트 리미팅 적용).
 
     각 프레임을 multipart/x-mixed-replace 포맷으로 yield합니다.
     카메라 캡처는 블로킹 작업이므로 run_in_executor로 스레드풀에서 실행합니다.
+
+    레이트 리미팅 전략:
+      - 프레임 시작 시각을 기록하고, 캡처+인코딩에 소요된 시간을 측정합니다.
+      - 1프레임 목표 시간(= 1 / TARGET_FPS)에서 실제 소요 시간을 뺀 잔여 시간만큼
+        asyncio.sleep()으로 대기합니다.
+      - 캡처가 목표 시간보다 오래 걸린 경우(슬로우 프레임)에는 sleep을 건너뜁니다.
     """
     loop = asyncio.get_running_loop()
+    frame_interval = 1.0 / CAM_TARGET_FPS  # 예: 30fps → 0.03333...초
 
     while True:
+        frame_start = time.monotonic()
+
         try:
             # 블로킹 캡처를 스레드풀에서 실행 → 이벤트 루프 블로킹 방지
             jpeg_bytes: bytes = await loop.run_in_executor(
@@ -120,7 +132,7 @@ async def _mjpeg_generator() -> AsyncGenerator[bytes, None]:
             )
         except Exception as exc:
             logger.warning("프레임 캡처 실패 (계속): %s", exc)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(frame_interval)
             continue
 
         yield (
@@ -131,8 +143,11 @@ async def _mjpeg_generator() -> AsyncGenerator[bytes, None]:
             + b"\r\n"
         )
 
-        # 프레임 사이 최소 대기 (서버 CPU 과부하 방지)
-        await asyncio.sleep(0)
+        # 실제 소요 시간을 측정하고 남은 시간만 sleep
+        elapsed = time.monotonic() - frame_start
+        sleep_time = frame_interval - elapsed
+        if sleep_time > 0:
+            await asyncio.sleep(sleep_time)
 
 
 # ---------------------------------------------------------------------------
