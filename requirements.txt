@@ -1,0 +1,10 @@
+# Raspberry Pi Zero 2W — V4L2 Camera Streaming Server
+# 설치: pip install -r requirements.txt
+
+# 웹 프레임워크
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+
+# 이미지 처리
+numpy>=1.26.0
+opencv-python-headless>=4.9.0.80
