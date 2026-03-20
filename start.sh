@@ -52,12 +52,21 @@ if [ -z "$PYTHON_BIN" ]; then
     fi
 fi
 
-# pip 패키지 확인 (fastapi, uvicorn)
-if ! "$PYTHON_BIN" -c "import fastapi, uvicorn, cv2" 2>/dev/null; then
-    echo "[WARNING] fastapi/uvicorn/cv2 미설치 → 설치 중..."
+# pip 패키지 확인 (fastapi, uvicorn, cv2)
+# ※ numpy는 자동 설치하지 않습니다.
+#   picamera2는 apt의 시스템 numpy(1.24.x)와 바이너리 호환이 필요하므로
+#   pip로 numpy를 업그레이드하면 충돌이 발생합니다.
+#   opencv-python-headless도 numpy를 당겨오므로 직접 apt로 설치합니다.
+#     sudo apt install -y python3-opencv
+if ! "$PYTHON_BIN" -c "import fastapi, uvicorn" 2>/dev/null; then
+    echo "[WARNING] fastapi/uvicorn 미설치 → 설치 중..."
     "$PYTHON_BIN" -m pip install --break-system-packages \
-        "fastapi>=0.111.0" "uvicorn[standard]>=0.29.0" \
-        "opencv-python-headless>=4.9.0.80" 2>/dev/null || true
+        "fastapi>=0.111.0" "uvicorn[standard]>=0.29.0" 2>/dev/null || true
+fi
+if ! "$PYTHON_BIN" -c "import cv2" 2>/dev/null; then
+    echo "[WARNING] opencv 미설치 → apt 설치를 권장합니다:"
+    echo "  sudo apt install -y python3-opencv"
+    echo "  (pip 설치는 numpy 충돌을 유발할 수 있음)"
 fi
 
 # ---------------------------------------------------------------------------
