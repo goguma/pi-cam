@@ -1,5 +1,13 @@
-# Raspberry Pi Zero 2W — V4L2 Camera Streaming Server
-# 설치: pip install -r requirements.txt
+# Raspberry Pi Zero 2W — Pi Camera Streaming Server
+#
+# 설치 순서:
+#
+# 1. 시스템 패키지 (apt):
+#    sudo apt update
+#    sudo apt install -y python3-picamera2
+#
+# 2. pip 패키지:
+#    pip install -r requirements.txt
 
 # 웹 프레임워크
 fastapi>=0.111.0
@@ -8,3 +16,6 @@ uvicorn[standard]>=0.29.0
 # 이미지 처리
 numpy>=1.26.0
 opencv-python-headless>=4.9.0.80
+
+# picamera2는 시스템 패키지로 설치 (apt)
+# pip install picamera2 는 Pi OS에서 충돌 가능하므로 사용하지 않습니다
