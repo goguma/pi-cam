@@ -23,37 +23,60 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# V4L2 상수 정의
+# V4L2 ioctl 번호 계산 헬퍼 (linux/ioctl.h 기준)
 # ---------------------------------------------------------------------------
+# ARM64(aarch64) / ARM32 모두 동일한 매크로 레이아웃 사용
+#   bits[ 7: 0] = NR   (함수 번호)
+#   bits[15: 8] = TYPE (매직 문자)
+#   bits[29:16] = SIZE (구조체 크기, 최대 14비트 = 16383)
+#   bits[31:30] = DIR  (방향: 0=None, 1=Write, 2=Read, 3=R/W)
 
-# ioctl 요청 번호 (linux/videodev2.h)
+_IOC_NRBITS   = 8
+_IOC_TYPEBITS = 8
+_IOC_SIZEBITS = 14
+_IOC_DIRBITS  = 2
+
+_IOC_NRSHIFT   = 0
+_IOC_TYPESHIFT = _IOC_NRSHIFT   + _IOC_NRBITS    # 8
+_IOC_SIZESHIFT = _IOC_TYPESHIFT + _IOC_TYPEBITS   # 16
+_IOC_DIRSHIFT  = _IOC_SIZESHIFT + _IOC_SIZEBITS   # 30
+
 _IOC_NONE  = 0
 _IOC_WRITE = 1
 _IOC_READ  = 2
 
-def _IOC(direction, _type, nr, size):
+
+def _IOC(direction: int, _type: str, nr: int, size: int) -> int:
     return (
-        (direction << 30)
-        | (ord(_type) << 8)
-        | nr
-        | (size << 16)
+        (direction      << _IOC_DIRSHIFT)
+        | (ord(_type)   << _IOC_TYPESHIFT)
+        | (nr           << _IOC_NRSHIFT)
+        | (size         << _IOC_SIZESHIFT)
     )
 
-def _IOWR(_type, nr, size):
-    return _IOC(_IOC_READ | _IOC_WRITE, _type, nr, size)
 
-def _IOW(_type, nr, size):
-    return _IOC(_IOC_WRITE, _type, nr, size)
-
-def _IOR(_type, nr, size):
-    return _IOC(_IOC_READ, _type, nr, size)
-
-def _IO(_type, nr):
+def _IO(_type: str, nr: int) -> int:
     return _IOC(_IOC_NONE, _type, nr, 0)
 
 
+def _IOR(_type: str, nr: int, size: int) -> int:
+    return _IOC(_IOC_READ, _type, nr, size)
+
+
+def _IOW(_type: str, nr: int, size: int) -> int:
+    return _IOC(_IOC_WRITE, _type, nr, size)
+
+
+def _IOWR(_type: str, nr: int, size: int) -> int:
+    return _IOC(_IOC_READ | _IOC_WRITE, _type, nr, size)
+
+
+# ---------------------------------------------------------------------------
+# V4L2 상수 (linux/videodev2.h)
+# ---------------------------------------------------------------------------
+
 # 픽셀 포맷
-V4L2_PIX_FMT_YUYV = 0x56595559  # 'YUYV'
+V4L2_PIX_FMT_YUYV  = 0x56595559  # 'YUYV'
 V4L2_PIX_FMT_MJPEG = 0x47504A4D  # 'MJPG'
 
 # 버퍼 타입
@@ -67,6 +90,10 @@ V4L2_FIELD_NONE = 1
 
 # ---------------------------------------------------------------------------
 # V4L2 구조체 정의 (ctypes)
+#
+# 주의: 구조체 크기가 커널이 기대하는 값과 정확히 일치해야 합니다.
+#   v4l2_format union 크기 = 200 bytes (raw_data[200])
+#   v4l2_format 전체 = 4(type) + 200(fmt) = 204 bytes
 # ---------------------------------------------------------------------------
 
 class v4l2_pix_format(ctypes.Structure):
@@ -87,9 +114,10 @@ class v4l2_pix_format(ctypes.Structure):
 
 
 class _u_fmt(ctypes.Union):
+    """v4l2_format.fmt 유니온 — raw_data[200]과 동일한 크기를 유지합니다."""
     _fields_ = [
-        ("pix",  v4l2_pix_format),
-        ("raw",  ctypes.c_uint8 * 200),
+        ("pix", v4l2_pix_format),
+        ("raw", ctypes.c_uint8 * 200),
     ]
 
 
@@ -102,37 +130,42 @@ class v4l2_format(ctypes.Structure):
 
 class v4l2_requestbuffers(ctypes.Structure):
     _fields_ = [
-        ("count",  ctypes.c_uint32),
-        ("type",   ctypes.c_uint32),
-        ("memory", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint32 * 2),
+        ("count",    ctypes.c_uint32),
+        ("type",     ctypes.c_uint32),
+        ("memory",   ctypes.c_uint32),
+        ("capabilities", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
     ]
 
 
 class v4l2_timecode(ctypes.Structure):
     _fields_ = [
-        ("type",    ctypes.c_uint32),
-        ("flags",   ctypes.c_uint32),
-        ("frames",  ctypes.c_uint8),
-        ("seconds", ctypes.c_uint8),
-        ("minutes", ctypes.c_uint8),
-        ("hours",   ctypes.c_uint8),
+        ("type",     ctypes.c_uint32),
+        ("flags",    ctypes.c_uint32),
+        ("frames",   ctypes.c_uint8),
+        ("seconds",  ctypes.c_uint8),
+        ("minutes",  ctypes.c_uint8),
+        ("hours",    ctypes.c_uint8),
         ("userbits", ctypes.c_uint8 * 4),
     ]
 
 
 class v4l2_timeval(ctypes.Structure):
+    """
+    struct timeval — tv_sec/tv_usec 크기는 플랫폼에 따라 다릅니다.
+    64-bit Linux: __kernel_long_t = 64비트 → c_int64 사용
+    """
     _fields_ = [
-        ("tv_sec",  ctypes.c_long),
-        ("tv_usec", ctypes.c_long),
+        ("tv_sec",  ctypes.c_int64),
+        ("tv_usec", ctypes.c_int64),
     ]
 
 
 class _u_m(ctypes.Union):
     _fields_ = [
-        ("offset",   ctypes.c_uint32),
-        ("userptr",  ctypes.c_ulong),
-        ("fd",       ctypes.c_int32),
+        ("offset",  ctypes.c_uint32),
+        ("userptr", ctypes.c_ulong),
+        ("fd",      ctypes.c_int32),
     ]
 
 
@@ -143,27 +176,37 @@ class v4l2_buffer(ctypes.Structure):
         ("bytesused", ctypes.c_uint32),
         ("flags",     ctypes.c_uint32),
         ("field",     ctypes.c_uint32),
+        # 64비트 정렬을 위한 패딩 (커널 구조체와 일치)
+        ("_pad1",     ctypes.c_uint32),
         ("timestamp", v4l2_timeval),
         ("timecode",  v4l2_timecode),
         ("sequence",  ctypes.c_uint32),
         ("memory",    ctypes.c_uint32),
         ("m",         _u_m),
         ("length",    ctypes.c_uint32),
-        ("input",     ctypes.c_uint32),
-        ("reserved",  ctypes.c_uint32),
+        ("reserved2", ctypes.c_uint32),
+        ("request_fd", ctypes.c_int32),
     ]
 
 
-# ioctl 요청 번호
-VIDIOC_QUERYCAP  = _IOR('V', 0,  ctypes.sizeof(ctypes.c_uint8) * 104)
-VIDIOC_S_FMT     = _IOWR('V', 5,  ctypes.sizeof(v4l2_format))
-VIDIOC_G_FMT     = _IOWR('V', 4,  ctypes.sizeof(v4l2_format))
-VIDIOC_REQBUFS   = _IOWR('V', 8,  ctypes.sizeof(v4l2_requestbuffers))
-VIDIOC_QUERYBUF  = _IOWR('V', 9,  ctypes.sizeof(v4l2_buffer))
+# ---------------------------------------------------------------------------
+# ioctl 요청 번호 (linux/videodev2.h 기준 실제값)
+# ---------------------------------------------------------------------------
+VIDIOC_QUERYCAP  = _IOR ('V',  0, ctypes.sizeof(ctypes.c_uint8) * 104)
+VIDIOC_G_FMT     = _IOWR('V',  4, ctypes.sizeof(v4l2_format))
+VIDIOC_S_FMT     = _IOWR('V',  5, ctypes.sizeof(v4l2_format))
+VIDIOC_REQBUFS   = _IOWR('V',  8, ctypes.sizeof(v4l2_requestbuffers))
+VIDIOC_QUERYBUF  = _IOWR('V',  9, ctypes.sizeof(v4l2_buffer))
 VIDIOC_QBUF      = _IOWR('V', 15, ctypes.sizeof(v4l2_buffer))
 VIDIOC_DQBUF     = _IOWR('V', 17, ctypes.sizeof(v4l2_buffer))
-VIDIOC_STREAMON  = _IOW('V', 18, ctypes.sizeof(ctypes.c_int))
-VIDIOC_STREAMOFF = _IOW('V', 19, ctypes.sizeof(ctypes.c_int))
+VIDIOC_STREAMON  = _IOW ('V', 18, ctypes.sizeof(ctypes.c_int))
+VIDIOC_STREAMOFF = _IOW ('V', 19, ctypes.sizeof(ctypes.c_int))
+
+logger.debug(
+    "ioctl 번호 확인: VIDIOC_S_FMT=0x%08X (구조체 크기=%d bytes)",
+    VIDIOC_S_FMT,
+    ctypes.sizeof(v4l2_format),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +220,7 @@ class V4L2Camera:
     사용 예:
         with V4L2Camera(width=1280, height=720) as cam:
             for frame in cam.iter_frames():
-                # frame: (H, W, 3) numpy ndarray (BGR)
+                # frame: JPEG bytes
                 ...
     """
 
@@ -208,6 +251,7 @@ class V4L2Camera:
         """디바이스를 열고 스트리밍을 시작합니다."""
         logger.info("디바이스 오픈: %s", self.device)
         self._fd = os.open(self.device, os.O_RDWR | os.O_NONBLOCK)
+        self._check_device()
         self._set_format()
         self._request_buffers()
         self._mmap_buffers()
@@ -296,47 +340,102 @@ class V4L2Camera:
     # 내부 구현 — V4L2 ioctl 헬퍼
     # ------------------------------------------------------------------
 
-    def _ioctl(self, request: int, arg) -> None:
-        """fcntl.ioctl 래퍼 (오류 시 OSError 발생)."""
-        fcntl.ioctl(self._fd, request, arg)
+    def _ioctl(self, request: int, arg: ctypes.Structure) -> None:
+        """
+        fcntl.ioctl 래퍼.
+
+        ctypes 구조체를 `from_buffer()`로 연결하여 커널이 수정한 결과가
+        원본 구조체에 바로 반영되도록 합니다.
+        단순히 ctypes 구조체를 fcntl.ioctl에 넘기면 Python이 임시 복사본을
+        만들어 결과가 원본에 반영되지 않는 문제를 방지합니다.
+        """
+        buf = (ctypes.c_char * ctypes.sizeof(arg)).from_buffer(arg)
+        try:
+            fcntl.ioctl(self._fd, request, buf, True)
+        except OSError as exc:
+            raise OSError(
+                exc.errno,
+                f"ioctl 실패 (request=0x{request:08X}, errno={exc.errno}): {exc.strerror}",
+            ) from exc
+
+    def _check_device(self) -> None:
+        """
+        VIDIOC_QUERYCAP: 디바이스가 V4L2 캡처를 지원하는지 확인합니다.
+
+        지원하지 않으면 명확한 에러 메시지를 출력합니다.
+        """
+        # QUERYCAP 구조체 (104 bytes raw)
+        cap = (ctypes.c_uint8 * 104)()
+        cap_buf = (ctypes.c_char * 104).from_buffer(cap)
+        try:
+            fcntl.ioctl(self._fd, VIDIOC_QUERYCAP, cap_buf, True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"{self.device} 는 V4L2 디바이스가 아닙니다: {exc}"
+            ) from exc
+
+        # capabilities 필드: offset 96, 4 bytes (little-endian)
+        capabilities = int.from_bytes(bytes(cap[96:100]), "little")
+        V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+        V4L2_CAP_STREAMING     = 0x04000000
+
+        driver = bytes(cap[0:16]).rstrip(b"\x00").decode("utf-8", errors="replace")
+        card   = bytes(cap[16:48]).rstrip(b"\x00").decode("utf-8", errors="replace")
+        logger.info(
+            "QUERYCAP: driver='%s', card='%s', capabilities=0x%08X",
+            driver, card, capabilities,
+        )
+
+        if not (capabilities & V4L2_CAP_VIDEO_CAPTURE):
+            raise RuntimeError(
+                f"{self.device} 는 VIDEO_CAPTURE를 지원하지 않습니다 "
+                f"(capabilities=0x{capabilities:08X}). "
+                "다른 /dev/videoN 디바이스를 시도하세요."
+            )
+        if not (capabilities & V4L2_CAP_STREAMING):
+            raise RuntimeError(
+                f"{self.device} 는 STREAMING을 지원하지 않습니다."
+            )
 
     def _set_format(self) -> None:
         """VIDIOC_S_FMT: 해상도와 픽셀 포맷을 설정합니다."""
         fmt = v4l2_format()
         fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE
-        fmt.fmt.pix.width = self.width
-        fmt.fmt.pix.height = self.height
+        fmt.fmt.pix.width       = self.width
+        fmt.fmt.pix.height      = self.height
         fmt.fmt.pix.pixelformat = self.pixel_format
-        fmt.fmt.pix.field = V4L2_FIELD_NONE
+        fmt.fmt.pix.field       = V4L2_FIELD_NONE
         self._ioctl(VIDIOC_S_FMT, fmt)
 
         # 드라이버가 실제로 적용한 값을 반영
-        self.width = fmt.fmt.pix.width
+        self.width  = fmt.fmt.pix.width
         self.height = fmt.fmt.pix.height
-        logger.debug(
-            "포맷 설정 완료: %dx%d, sizeimage=%d",
-            self.width, self.height, fmt.fmt.pix.sizeimage,
+        logger.info(
+            "포맷 설정 완료: %dx%d, pixfmt=0x%08X, sizeimage=%d",
+            self.width, self.height,
+            fmt.fmt.pix.pixelformat,
+            fmt.fmt.pix.sizeimage,
         )
 
     def _request_buffers(self) -> None:
         """VIDIOC_REQBUFS: 커널 버퍼를 요청합니다."""
         req = v4l2_requestbuffers()
-        req.count = self.num_buffers
-        req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE
+        req.count  = self.num_buffers
+        req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE
         req.memory = V4L2_MEMORY_MMAP
         self._ioctl(VIDIOC_REQBUFS, req)
         self.num_buffers = req.count
-        logger.debug("버퍼 %d개 할당됨", self.num_buffers)
+        logger.info("버퍼 %d개 할당됨", self.num_buffers)
 
     def _mmap_buffers(self) -> None:
         """VIDIOC_QUERYBUF + mmap: 버퍼를 유저 공간에 매핑합니다."""
-        self._buffers = []
+        self._buffers     = []
         self._buf_lengths = []
         for i in range(self.num_buffers):
-            buf = v4l2_buffer()
-            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE
+            buf        = v4l2_buffer()
+            buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE
             buf.memory = V4L2_MEMORY_MMAP
-            buf.index = i
+            buf.index  = i
             self._ioctl(VIDIOC_QUERYBUF, buf)
 
             mm = mmap.mmap(
@@ -348,7 +447,10 @@ class V4L2Camera:
             )
             self._buffers.append(mm)
             self._buf_lengths.append(buf.length)
-            logger.debug("버퍼[%d] mmap: offset=%d length=%d", i, buf.m.offset, buf.length)
+            logger.debug(
+                "버퍼[%d] mmap: offset=%d, length=%d",
+                i, buf.m.offset, buf.length,
+            )
 
     def _queue_all_buffers(self) -> None:
         """모든 버퍼를 초기 큐에 넣습니다."""
@@ -357,19 +459,21 @@ class V4L2Camera:
 
     def _queue_buffer(self, index: int) -> None:
         """VIDIOC_QBUF: 버퍼를 드라이버에 반환합니다."""
-        buf = v4l2_buffer()
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE
+        buf        = v4l2_buffer()
+        buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE
         buf.memory = V4L2_MEMORY_MMAP
-        buf.index = index
+        buf.index  = index
         self._ioctl(VIDIOC_QBUF, buf)
 
     def _dequeue_buffer(self) -> v4l2_buffer:
         """VIDIOC_DQBUF: 채워진 버퍼를 드라이버에서 가져옵니다."""
-        # 논블로킹 fd이므로 select로 준비 대기
-        select.select([self._fd], [], [], 2.0)
+        # O_NONBLOCK fd이므로 select로 준비 대기 (최대 2초)
+        ready, _, _ = select.select([self._fd], [], [], 2.0)
+        if not ready:
+            raise TimeoutError("카메라 프레임 대기 시간 초과 (2초)")
 
-        buf = v4l2_buffer()
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE
+        buf        = v4l2_buffer()
+        buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE
         buf.memory = V4L2_MEMORY_MMAP
         self._ioctl(VIDIOC_DQBUF, buf)
         return buf
@@ -377,25 +481,26 @@ class V4L2Camera:
     def _stream_on(self) -> None:
         """VIDIOC_STREAMON: 스트리밍을 시작합니다."""
         buf_type = ctypes.c_int(V4L2_BUF_TYPE_VIDEO_CAPTURE)
-        self._ioctl(VIDIOC_STREAMON, buf_type)
+        buf      = (ctypes.c_char * ctypes.sizeof(buf_type)).from_buffer(buf_type)
+        fcntl.ioctl(self._fd, VIDIOC_STREAMON, buf, True)
         self._streaming = True
 
     def _stream_off(self) -> None:
         """VIDIOC_STREAMOFF: 스트리밍을 중지합니다."""
         buf_type = ctypes.c_int(V4L2_BUF_TYPE_VIDEO_CAPTURE)
-        self._ioctl(VIDIOC_STREAMOFF, buf_type)
+        buf      = (ctypes.c_char * ctypes.sizeof(buf_type)).from_buffer(buf_type)
+        fcntl.ioctl(self._fd, VIDIOC_STREAMOFF, buf, True)
         self._streaming = False
 
     def _read_buffer(self, buf: v4l2_buffer) -> np.ndarray:
         """
-        mmap에서 데이터를 Zero-copy로 읽어 numpy ndarray로 반환합니다.
+        mmap에서 데이터를 읽어 numpy ndarray로 반환합니다.
 
         Returns:
             np.ndarray: shape (bytesused,), dtype=uint8
         """
         mm = self._buffers[buf.index]
         mm.seek(0)
-        # numpy.frombuffer는 복사 없이 메모리를 공유합니다.
         raw = np.frombuffer(mm.read(buf.bytesused), dtype=np.uint8)
         return raw
 
@@ -409,7 +514,6 @@ class V4L2Camera:
         Returns:
             np.ndarray: shape (height, width, 3), BGR
         """
-        # YUYV → (H, W, 2) → OpenCV cvtColor
         yuyv = raw.reshape((self.height, self.width, 2))
-        bgr = cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUYV)
+        bgr  = cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUYV)
         return bgr
