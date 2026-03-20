@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---------------------------------------------------------------------------
 # libcamera v4l2-compat.so 경로 탐색
 # ---------------------------------------------------------------------------
+# 1) 알려진 고정 경로 우선 확인
 V4L2_COMPAT_PATHS=(
     "/usr/lib/aarch64-linux-gnu/libcamera/v4l2-compat.so"   # 64-bit Pi OS
     "/usr/lib/arm-linux-gnueabihf/libcamera/v4l2-compat.so" # 32-bit Pi OS
@@ -32,14 +33,25 @@ for path in "${V4L2_COMPAT_PATHS[@]}"; do
     fi
 done
 
+# 2) 고정 경로에 없으면 find로 전체 탐색
+if [ -z "$V4L2_COMPAT" ]; then
+    V4L2_COMPAT=$(find /usr /lib -name "v4l2-compat.so" 2>/dev/null | head -1)
+fi
+
 if [ -z "$V4L2_COMPAT" ]; then
     echo "========================================================="
-    echo "[경고] v4l2-compat.so 를 찾을 수 없습니다."
-    echo "  libcamera 패키지가 설치되어 있는지 확인하세요:"
-    echo "  sudo apt install libcamera-dev"
+    echo "[오류] v4l2-compat.so 를 찾을 수 없습니다."
     echo ""
-    echo "  v4l2-compat 없이 직접 실행을 시도합니다..."
+    echo "  unicam 디바이스(64비트 Pi OS)에서 카메라를 사용하려면"
+    echo "  libcamera의 V4L2 호환 레이어가 필요합니다."
+    echo ""
+    echo "  설치 방법:"
+    echo "    sudo apt update"
+    echo "    sudo apt install libcamera-dev"
+    echo ""
+    echo "  설치 후 다시 실행하세요: ./start.sh"
     echo "========================================================="
+    exit 1
 else
     echo "[INFO] v4l2-compat 프리로드: $V4L2_COMPAT"
     export LD_PRELOAD="$V4L2_COMPAT"
