@@ -374,25 +374,40 @@ class V4L2Camera:
                 f"{self.device} 는 V4L2 디바이스가 아닙니다: {exc}"
             ) from exc
 
-        # capabilities 필드: offset 96, 4 bytes (little-endian)
-        capabilities = int.from_bytes(bytes(cap[96:100]), "little")
+        # v4l2_capability 레이아웃:
+        #   driver[16]   offset  0
+        #   card[32]     offset 16
+        #   bus_info[32] offset 48
+        #   version u32  offset 80
+        #   capabilities offset 84  ← 주의: 96 아님
+        #   device_caps  offset 88
+        #   reserved[3]  offset 92
+        capabilities = int.from_bytes(bytes(cap[84:88]), "little")
+        device_caps  = int.from_bytes(bytes(cap[88:92]), "little")
+
         V4L2_CAP_VIDEO_CAPTURE = 0x00000001
         V4L2_CAP_STREAMING     = 0x04000000
+        # device_caps가 유효한 경우(V4L2_CAP_DEVICE_CAPS=0x80000000) device_caps를 우선 사용
+        V4L2_CAP_DEVICE_CAPS   = 0x80000000
+        effective_caps = device_caps if (capabilities & V4L2_CAP_DEVICE_CAPS) else capabilities
 
-        driver = bytes(cap[0:16]).rstrip(b"\x00").decode("utf-8", errors="replace")
-        card   = bytes(cap[16:48]).rstrip(b"\x00").decode("utf-8", errors="replace")
+        driver   = bytes(cap[0:16]).rstrip(b"\x00").decode("utf-8", errors="replace")
+        card     = bytes(cap[16:48]).rstrip(b"\x00").decode("utf-8", errors="replace")
+        bus_info = bytes(cap[48:80]).rstrip(b"\x00").decode("utf-8", errors="replace")
         logger.info(
-            "QUERYCAP: driver='%s', card='%s', capabilities=0x%08X",
-            driver, card, capabilities,
+            "QUERYCAP: driver='%s', card='%s', bus='%s', "
+            "capabilities=0x%08X, device_caps=0x%08X",
+            driver, card, bus_info, capabilities, device_caps,
         )
 
-        if not (capabilities & V4L2_CAP_VIDEO_CAPTURE):
+        if not (effective_caps & V4L2_CAP_VIDEO_CAPTURE):
             raise RuntimeError(
                 f"{self.device} 는 VIDEO_CAPTURE를 지원하지 않습니다 "
-                f"(capabilities=0x{capabilities:08X}). "
-                "다른 /dev/videoN 디바이스를 시도하세요."
+                f"(capabilities=0x{capabilities:08X}, device_caps=0x{device_caps:08X}). "
+                "다른 /dev/videoN 디바이스를 시도하세요.\n"
+                "힌트: ls /dev/video* 로 사용 가능한 디바이스를 확인하세요."
             )
-        if not (capabilities & V4L2_CAP_STREAMING):
+        if not (effective_caps & V4L2_CAP_STREAMING):
             raise RuntimeError(
                 f"{self.device} 는 STREAMING을 지원하지 않습니다."
             )
