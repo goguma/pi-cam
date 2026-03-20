@@ -217,7 +217,11 @@ logger.debug(
 # ctypes.CDLL을 통해 직접 libc.ioctl을 호출하면 동적 링커의
 # 심볼 해석을 거쳐 LD_PRELOAD 인터셉터가 확실히 적용됩니다.
 # ---------------------------------------------------------------------------
-_libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+# ctypes.CDLL(None) = 프로세스 전역 심볼 테이블 (dlopen(NULL, ...))
+# 이 방식은 LD_PRELOAD로 주입된 심볼(libcamera v4l2-compat의 ioctl 등)을
+# 확실히 포함하며, 명시적으로 libc를 다시 로드하면 LD_PRELOAD를 우회할 수 있는
+# 문제를 방지합니다.
+_libc = ctypes.CDLL(None, use_errno=True)
 _libc_ioctl = _libc.ioctl
 _libc_ioctl.restype  = ctypes.c_int
 _libc_ioctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_void_p]
