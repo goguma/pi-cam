@@ -12,7 +12,7 @@ libcamera 없이 리눅스 커널 V4L2(Video4Linux2) 인터페이스를
 import os
 import mmap
 import ctypes
-import fcntl
+import ctypes.util
 import select
 import logging
 from typing import Generator
@@ -208,6 +208,20 @@ logger.debug(
     ctypes.sizeof(v4l2_format),
 )
 
+# ---------------------------------------------------------------------------
+# libc ioctl 직접 바인딩
+#
+# Python의 fcntl.ioctl은 내부적으로 libc의 ioctl()을 호출하지만,
+# 일부 환경에서 LD_PRELOAD 인터셉터(libcamera v4l2-compat.so 등)와
+# 호환되지 않을 수 있습니다.
+# ctypes.CDLL을 통해 직접 libc.ioctl을 호출하면 동적 링커의
+# 심볼 해석을 거쳐 LD_PRELOAD 인터셉터가 확실히 적용됩니다.
+# ---------------------------------------------------------------------------
+_libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+_libc_ioctl = _libc.ioctl
+_libc_ioctl.restype  = ctypes.c_int
+_libc_ioctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_void_p]
+
 
 # ---------------------------------------------------------------------------
 # V4L2Camera 클래스
@@ -342,21 +356,21 @@ class V4L2Camera:
 
     def _ioctl(self, request: int, arg: ctypes.Structure) -> None:
         """
-        fcntl.ioctl 래퍼.
+        libc ioctl 직접 호출 래퍼.
 
-        ctypes 구조체를 `from_buffer()`로 연결하여 커널이 수정한 결과가
-        원본 구조체에 바로 반영되도록 합니다.
-        단순히 ctypes 구조체를 fcntl.ioctl에 넘기면 Python이 임시 복사본을
-        만들어 결과가 원본에 반영되지 않는 문제를 방지합니다.
+        ctypes.CDLL을 통해 libc의 ioctl()을 직접 호출합니다.
+        동적 링커를 통해 심볼이 해석되므로 LD_PRELOAD 인터셉터
+        (libcamera v4l2-compat.so 등)가 확실히 적용됩니다.
+        ctypes.byref(arg)로 구조체의 주소를 직접 전달하여
+        커널이 수정한 결과가 원본 구조체에 바로 반영됩니다.
         """
-        buf = (ctypes.c_char * ctypes.sizeof(arg)).from_buffer(arg)
-        try:
-            fcntl.ioctl(self._fd, request, buf, True)
-        except OSError as exc:
+        ret = _libc_ioctl(self._fd, request, ctypes.byref(arg))
+        if ret < 0:
+            errno = ctypes.get_errno()
             raise OSError(
-                exc.errno,
-                f"ioctl 실패 (request=0x{request:08X}, errno={exc.errno}): {exc.strerror}",
-            ) from exc
+                errno,
+                f"ioctl 실패 (request=0x{request:08X}, errno={errno}): {os.strerror(errno)}",
+            )
 
     def _check_device(self) -> None:
         """
@@ -366,13 +380,13 @@ class V4L2Camera:
         """
         # QUERYCAP 구조체 (104 bytes raw)
         cap = (ctypes.c_uint8 * 104)()
-        cap_buf = (ctypes.c_char * 104).from_buffer(cap)
-        try:
-            fcntl.ioctl(self._fd, VIDIOC_QUERYCAP, cap_buf, True)
-        except OSError as exc:
+        ret = _libc_ioctl(self._fd, VIDIOC_QUERYCAP, ctypes.cast(cap, ctypes.c_void_p))
+        if ret < 0:
+            errno = ctypes.get_errno()
             raise RuntimeError(
-                f"{self.device} 는 V4L2 디바이스가 아닙니다: {exc}"
-            ) from exc
+                f"{self.device} 는 V4L2 디바이스가 아닙니다 "
+                f"(errno={errno}: {os.strerror(errno)})"
+            )
 
         # v4l2_capability 레이아웃:
         #   driver[16]   offset  0
@@ -496,15 +510,19 @@ class V4L2Camera:
     def _stream_on(self) -> None:
         """VIDIOC_STREAMON: 스트리밍을 시작합니다."""
         buf_type = ctypes.c_int(V4L2_BUF_TYPE_VIDEO_CAPTURE)
-        buf      = (ctypes.c_char * ctypes.sizeof(buf_type)).from_buffer(buf_type)
-        fcntl.ioctl(self._fd, VIDIOC_STREAMON, buf, True)
+        ret = _libc_ioctl(self._fd, VIDIOC_STREAMON, ctypes.byref(buf_type))
+        if ret < 0:
+            errno = ctypes.get_errno()
+            raise OSError(errno, f"STREAMON 실패: {os.strerror(errno)}")
         self._streaming = True
 
     def _stream_off(self) -> None:
         """VIDIOC_STREAMOFF: 스트리밍을 중지합니다."""
         buf_type = ctypes.c_int(V4L2_BUF_TYPE_VIDEO_CAPTURE)
-        buf      = (ctypes.c_char * ctypes.sizeof(buf_type)).from_buffer(buf_type)
-        fcntl.ioctl(self._fd, VIDIOC_STREAMOFF, buf, True)
+        ret = _libc_ioctl(self._fd, VIDIOC_STREAMOFF, ctypes.byref(buf_type))
+        if ret < 0:
+            errno = ctypes.get_errno()
+            raise OSError(errno, f"STREAMOFF 실패: {os.strerror(errno)}")
         self._streaming = False
 
     def _read_buffer(self, buf: v4l2_buffer) -> np.ndarray:
