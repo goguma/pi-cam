@@ -15,30 +15,49 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---------------------------------------------------------------------------
-# 가상환경 활성화 (있을 경우)
+# Python 인터프리터 선택
+#
+# 우선순위:
+#   1. 현재 활성화된 venv의 python (picamera2 import 가능한 경우)
+#   2. 시스템 python3 (venv에서 picamera2 안 보일 때 fallback)
+#
+# picamera2는 apt 시스템 패키지이므로 venv에서 numpy 버전 충돌이
+# 발생할 경우 시스템 python3를 직접 사용하는 것이 안전합니다.
 # ---------------------------------------------------------------------------
-if [ -f "$SCRIPT_DIR/.venv/bin/activate" ]; then
-    source "$SCRIPT_DIR/.venv/bin/activate"
-    echo "[INFO] 가상환경 활성화: $SCRIPT_DIR/.venv"
+PYTHON_BIN=""
+
+# 현재 venv 활성화되어 있으면 해당 python 우선 시도
+if [ -n "$VIRTUAL_ENV" ] && [ -f "$VIRTUAL_ENV/bin/python" ]; then
+    if "$VIRTUAL_ENV/bin/python" -c "import picamera2" 2>/dev/null; then
+        PYTHON_BIN="$VIRTUAL_ENV/bin/python"
+        echo "[INFO] 가상환경 python 사용: $PYTHON_BIN"
+    else
+        echo "[WARNING] 가상환경에서 picamera2 import 실패 → 시스템 python3 사용"
+    fi
 fi
 
-# ---------------------------------------------------------------------------
-# picamera2 설치 확인 (venv 활성화 후)
-# ---------------------------------------------------------------------------
-if ! python -c "import picamera2" 2>/dev/null; then
-    echo "========================================================="
-    echo "[오류] picamera2 를 import할 수 없습니다."
-    echo ""
-    echo "  1. 시스템 패키지 설치:"
-    echo "     sudo apt update && sudo apt install -y python3-picamera2"
-    echo ""
-    echo "  2. 가상환경을 사용 중이라면 --system-site-packages 로 재생성:"
-    echo "     rm -rf .venv"
-    echo "     python3 -m venv .venv --system-site-packages"
-    echo "     source .venv/bin/activate"
-    echo "     pip install -r requirements.txt"
-    echo "========================================================="
-    exit 1
+# venv에서 안 되면 시스템 python3로 fallback
+if [ -z "$PYTHON_BIN" ]; then
+    if python3 -c "import picamera2" 2>/dev/null; then
+        PYTHON_BIN="$(which python3)"
+        echo "[INFO] 시스템 python3 사용: $PYTHON_BIN"
+    else
+        echo "========================================================="
+        echo "[오류] picamera2 를 import할 수 없습니다."
+        echo ""
+        echo "  설치:"
+        echo "    sudo apt update && sudo apt install -y python3-picamera2"
+        echo "========================================================="
+        exit 1
+    fi
+fi
+
+# pip 패키지 확인 (fastapi, uvicorn)
+if ! "$PYTHON_BIN" -c "import fastapi, uvicorn, cv2" 2>/dev/null; then
+    echo "[WARNING] fastapi/uvicorn/cv2 미설치 → 설치 중..."
+    "$PYTHON_BIN" -m pip install --break-system-packages \
+        "fastapi>=0.111.0" "uvicorn[standard]>=0.29.0" \
+        "opencv-python-headless>=4.9.0.80" 2>/dev/null || true
 fi
 
 # ---------------------------------------------------------------------------
@@ -50,4 +69,4 @@ echo "       설정: ${CAM_WIDTH:-1280}x${CAM_HEIGHT:-720}, ${CAM_TARGET_FPS:-30
 echo ""
 
 cd "$SCRIPT_DIR"
-exec python server.py "$@"
+exec "$PYTHON_BIN" server.py "$@"

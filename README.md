@@ -125,7 +125,16 @@ loop:
 
 ## 동작 환경
 
-- **OS**: Raspberry Pi OS Bookworm (64-bit)
-- **카메라**: Camera Module 2 (IMX219)
-- **드라이버**: libcamera v0.7.0+ (picamera2)
-- **Python**: 3.11+
+| 항목 | 내용 |
+|---|---|
+| OS | Raspberry Pi OS Bookworm (64-bit) |
+| 카메라 | Camera Module 2 (IMX219) / Camera Module 3 |
+| 지원 보드 | Pi Zero 2W, Pi 4, **Pi 5** |
+| 드라이버 | libcamera v0.7.0+ (picamera2) |
+| Python | 3.11+ |
+
+### Pi 5 카메라 파이프라인 (참고)
+
+Pi 5는 RP1 칩 기반의 새로운 카메라 파이프라인을 사용합니다.
+`v4l2-ctl --list-devices`에서 `rp1-cfe` + `pispbe` 디바이스가 나타나는 것이 정상입니다.
+picamera2가 파이프라인을 자동으로 구성하므로 별도 설정 없이 `./start.sh`로 실행됩니다.
