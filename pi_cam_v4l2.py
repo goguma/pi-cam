@@ -431,24 +431,48 @@ class V4L2Camera:
             )
 
     def _set_format(self) -> None:
-        """VIDIOC_S_FMT: 해상도와 픽셀 포맷을 설정합니다."""
+        """
+        VIDIOC_S_FMT: 해상도와 픽셀 포맷을 설정합니다.
+
+        libcamera v4l2-compat 일부 버전은 VIDIOC_S_FMT를 지원하지 않습니다.
+        S_FMT가 실패(ENOTTY)하면 VIDIOC_G_FMT로 현재 포맷을 읽어 사용합니다.
+        """
         fmt = v4l2_format()
         fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE
         fmt.fmt.pix.width       = self.width
         fmt.fmt.pix.height      = self.height
         fmt.fmt.pix.pixelformat = self.pixel_format
         fmt.fmt.pix.field       = V4L2_FIELD_NONE
-        self._ioctl(VIDIOC_S_FMT, fmt)
+
+        try:
+            self._ioctl(VIDIOC_S_FMT, fmt)
+            logger.info(
+                "S_FMT 완료: %dx%d, pixfmt=0x%08X, sizeimage=%d",
+                fmt.fmt.pix.width, fmt.fmt.pix.height,
+                fmt.fmt.pix.pixelformat, fmt.fmt.pix.sizeimage,
+            )
+        except OSError as exc:
+            if exc.errno != 25:  # ENOTTY가 아니면 재발생
+                raise
+            logger.warning(
+                "VIDIOC_S_FMT 미지원 (errno=25) — G_FMT로 현재 포맷을 읽습니다."
+            )
+            # G_FMT로 드라이버 기본 포맷 조회
+            fmt_g = v4l2_format()
+            fmt_g.type = V4L2_BUF_TYPE_VIDEO_CAPTURE
+            self._ioctl(VIDIOC_G_FMT, fmt_g)
+            fmt = fmt_g
+            logger.info(
+                "G_FMT 조회: %dx%d, pixfmt=0x%08X, sizeimage=%d",
+                fmt.fmt.pix.width, fmt.fmt.pix.height,
+                fmt.fmt.pix.pixelformat, fmt.fmt.pix.sizeimage,
+            )
 
         # 드라이버가 실제로 적용한 값을 반영
-        self.width  = fmt.fmt.pix.width
-        self.height = fmt.fmt.pix.height
-        logger.info(
-            "포맷 설정 완료: %dx%d, pixfmt=0x%08X, sizeimage=%d",
-            self.width, self.height,
-            fmt.fmt.pix.pixelformat,
-            fmt.fmt.pix.sizeimage,
-        )
+        self.width        = fmt.fmt.pix.width
+        self.height       = fmt.fmt.pix.height
+        self.pixel_format = fmt.fmt.pix.pixelformat
+        self._sizeimage   = fmt.fmt.pix.sizeimage
 
     def _request_buffers(self) -> None:
         """VIDIOC_REQBUFS: 커널 버퍼를 요청합니다."""
