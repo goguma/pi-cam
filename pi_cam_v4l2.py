@@ -132,8 +132,10 @@ class PiCamera:
             bytes: JPEG 인코딩된 이미지
         """
         bgr = self.capture_frame()
+        # BGR → Grayscale 변환 (버퍼 레벨에서 흑백 처리)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         ok, encoded = cv2.imencode(
-            ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, quality]
+            ".jpg", gray, [cv2.IMWRITE_JPEG_QUALITY, quality]
         )
         if not ok:
             raise RuntimeError("JPEG 인코딩 실패")
