@@ -7,9 +7,11 @@ V4L2Camera(pi_cam_v4l2.py)를 이용해 카메라 프레임을 획득하고
 HTTP를 통해 실시간 MJPEG 스트림으로 제공합니다.
 
 엔드포인트:
-  GET /           → 브라우저 뷰어 HTML 페이지
-  GET /stream     → MJPEG 무한 스트림  (Content-Type: multipart/x-mixed-replace)
-  GET /snapshot   → JPEG 단일 프레임
+  GET /                → 브라우저 뷰어 HTML 페이지
+  GET /stream          → MJPEG 무한 스트림  (Content-Type: multipart/x-mixed-replace)
+  GET /snapshot        → JPEG 단일 프레임
+  GET /stream/face     → 얼굴 인식 MJPEG 무한 스트림
+  GET /snapshot/face   → 얼굴 인식 JPEG 단일 프레임
 
 환경변수:
   CAM_DEVICE      디바이스 경로          (기본: /dev/video0)
@@ -44,21 +46,21 @@ from pi_cam_v4l2 import V4L2Camera
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 환경변수 기반 설정
 # ---------------------------------------------------------------------------
-CAM_DEVICE  = os.getenv("CAM_DEVICE",  "/dev/video0")
-CAM_WIDTH   = int(os.getenv("CAM_WIDTH",   "1280"))
-CAM_HEIGHT  = int(os.getenv("CAM_HEIGHT",  "720"))
-CAM_BUFFERS = int(os.getenv("CAM_BUFFERS", "4"))
-CAM_QUALITY = int(os.getenv("CAM_QUALITY", "80"))
+CAM_DEVICE     = os.getenv("CAM_DEVICE",  "/dev/video0")
+CAM_WIDTH      = int(os.getenv("CAM_WIDTH",   "1280"))
+CAM_HEIGHT     = int(os.getenv("CAM_HEIGHT",  "720"))
+CAM_BUFFERS    = int(os.getenv("CAM_BUFFERS", "4"))
+CAM_QUALITY    = int(os.getenv("CAM_QUALITY", "80"))
 CAM_TARGET_FPS = int(os.getenv("CAM_TARGET_FPS", "30"))
-SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
+SERVER_HOST    = os.getenv("SERVER_HOST", "0.0.0.0")
+SERVER_PORT    = int(os.getenv("SERVER_PORT", "8000"))
 
 # ---------------------------------------------------------------------------
 # 공유 카메라 인스턴스
@@ -93,39 +95,45 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Pi Camera V4L2 Stream",
-    description="Raspberry Pi Zero 2W V4L2 기반 카메라 스트리밍 서버",
-    version="1.0.0",
+    title="Pi Camera Stream",
+    description="Raspberry Pi picamera2 기반 카메라 스트리밍 서버",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
-# MJPEG 스트림 제너레이터
+# MJPEG 스트림 헬퍼
 # ---------------------------------------------------------------------------
 
 MJPEG_BOUNDARY = b"--frame"
 
+
+def _wrap_mjpeg(jpeg_bytes: bytes) -> bytes:
+    """JPEG bytes를 MJPEG multipart 프레임으로 감쌉니다."""
+    return (
+        MJPEG_BOUNDARY
+        + b"\r\nContent-Type: image/jpeg\r\n"
+        + f"Content-Length: {len(jpeg_bytes)}\r\n\r\n".encode()
+        + jpeg_bytes
+        + b"\r\n"
+    )
+
+
 async def _mjpeg_generator() -> AsyncGenerator[bytes, None]:
     """
-    비동기 MJPEG 프레임 제너레이터 (Target FPS 기반 레이트 리미팅 적용).
-
-    각 프레임을 multipart/x-mixed-replace 포맷으로 yield합니다.
-    카메라 캡처는 블로킹 작업이므로 run_in_executor로 스레드풀에서 실행합니다.
+    흑백 MJPEG 프레임 제너레이터 (Target FPS 기반 레이트 리미팅 적용).
 
     레이트 리미팅 전략:
       - 프레임 시작 시각을 기록하고, 캡처+인코딩에 소요된 시간을 측정합니다.
       - 1프레임 목표 시간(= 1 / TARGET_FPS)에서 실제 소요 시간을 뺀 잔여 시간만큼
         asyncio.sleep()으로 대기합니다.
-      - 캡처가 목표 시간보다 오래 걸린 경우(슬로우 프레임)에는 sleep을 건너뜁니다.
     """
     loop = asyncio.get_running_loop()
-    frame_interval = 1.0 / CAM_TARGET_FPS  # 예: 30fps → 0.03333...초
+    frame_interval = 1.0 / CAM_TARGET_FPS
 
     while True:
         frame_start = time.monotonic()
-
         try:
-            # 블로킹 캡처를 스레드풀에서 실행 → 이벤트 루프 블로킹 방지
             jpeg_bytes: bytes = await loop.run_in_executor(
                 None,
                 lambda: camera.capture_jpeg(CAM_QUALITY),
@@ -135,15 +143,40 @@ async def _mjpeg_generator() -> AsyncGenerator[bytes, None]:
             await asyncio.sleep(frame_interval)
             continue
 
-        yield (
-            MJPEG_BOUNDARY
-            + b"\r\nContent-Type: image/jpeg\r\n"
-            + f"Content-Length: {len(jpeg_bytes)}\r\n\r\n".encode()
-            + jpeg_bytes
-            + b"\r\n"
-        )
+        yield _wrap_mjpeg(jpeg_bytes)
 
-        # 실제 소요 시간을 측정하고 남은 시간만 sleep
+        elapsed = time.monotonic() - frame_start
+        sleep_time = frame_interval - elapsed
+        if sleep_time > 0:
+            await asyncio.sleep(sleep_time)
+
+
+async def _mjpeg_face_generator() -> AsyncGenerator[bytes, None]:
+    """
+    얼굴 인식 결과가 표시된 MJPEG 프레임 제너레이터.
+
+    capture_jpeg_with_faces()를 사용하여 Haar Cascade 얼굴 검출 후
+    바운딩박스가 그려진 컬러 JPEG를 스트리밍합니다.
+    """
+    loop = asyncio.get_running_loop()
+    frame_interval = 1.0 / CAM_TARGET_FPS
+
+    while True:
+        frame_start = time.monotonic()
+        try:
+            jpeg_bytes, face_count = await loop.run_in_executor(
+                None,
+                lambda: camera.capture_jpeg_with_faces(CAM_QUALITY),
+            )
+            if face_count > 0:
+                logger.debug("얼굴 검출: %d명", face_count)
+        except Exception as exc:
+            logger.warning("얼굴 인식 프레임 캡처 실패 (계속): %s", exc)
+            await asyncio.sleep(frame_interval)
+            continue
+
+        yield _wrap_mjpeg(jpeg_bytes)
+
         elapsed = time.monotonic() - frame_start
         sleep_time = frame_interval - elapsed
         if sleep_time > 0:
@@ -166,7 +199,7 @@ async def index() -> HTMLResponse:
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Pi Camera — Live Stream</title>
+  <title>Pi Camera - Live Stream</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
@@ -186,6 +219,23 @@ async def index() -> HTMLResponse:
       border: 2px solid #333;
       border-radius: 4px;
     }}
+    .tabs {{
+      display: flex;
+      gap: 12px;
+    }}
+    .tabs button {{
+      background: #222;
+      color: #eee;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 6px 16px;
+      cursor: pointer;
+      font-family: monospace;
+    }}
+    .tabs button.active {{
+      background: #2a6;
+      border-color: #2a6;
+    }}
     .info {{
       font-size: .75rem;
       opacity: .4;
@@ -195,18 +245,32 @@ async def index() -> HTMLResponse:
   </style>
 </head>
 <body>
-  <h1>📷 Pi Camera Live</h1>
-  <img src="/stream" alt="MJPEG Stream" />
+  <h1>Pi Camera Live</h1>
+  <div class="tabs">
+    <button class="active" onclick="setStream('/stream', this)">흑백 스트림</button>
+    <button onclick="setStream('/stream/face', this)">얼굴 인식 스트림</button>
+  </div>
+  <img id="feed" src="/stream" alt="MJPEG Stream" />
   <p class="info">
-    해상도: {CAM_WIDTH}×{CAM_HEIGHT} &nbsp;|&nbsp;
+    해상도: {CAM_WIDTH}x{CAM_HEIGHT} &nbsp;|&nbsp;
     JPEG 품질: {CAM_QUALITY} &nbsp;|&nbsp;
     디바이스: {CAM_DEVICE}
   </p>
   <p class="info">
-    <a href="/snapshot" target="_blank">📸 스냅샷 저장</a>
+    <a href="/snapshot" target="_blank">스냅샷(흑백)</a>
     &nbsp;|&nbsp;
-    <a href="/docs" target="_blank">📄 API 문서</a>
+    <a href="/snapshot/face" target="_blank">스냅샷(얼굴인식)</a>
+    &nbsp;|&nbsp;
+    <a href="/docs" target="_blank">API 문서</a>
   </p>
+  <script>
+    function setStream(url, btn) {{
+      document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const img = document.getElementById('feed');
+      img.src = url + '?t=' + Date.now();
+    }}
+  </script>
 </body>
 </html>"""
     return HTMLResponse(content=html)
@@ -214,10 +278,9 @@ async def index() -> HTMLResponse:
 
 @app.get(
     "/stream",
-    summary="MJPEG 실시간 스트림",
+    summary="흑백 MJPEG 실시간 스트림",
     description=(
-        "multipart/x-mixed-replace 형식의 MJPEG 무한 스트림을 반환합니다. "
-        "브라우저의 <img src='/stream'>으로 바로 표시 가능합니다."
+        "흑백(Grayscale) multipart/x-mixed-replace 형식의 MJPEG 무한 스트림을 반환합니다."
     ),
     responses={
         200: {"content": {"multipart/x-mixed-replace": {}}},
@@ -235,8 +298,8 @@ async def stream() -> StreamingResponse:
 
 @app.get(
     "/snapshot",
-    summary="단일 프레임 스냅샷",
-    description="현재 카메라 프레임을 JPEG 이미지로 반환합니다.",
+    summary="흑백 단일 프레임 스냅샷",
+    description="현재 카메라 프레임을 흑백 JPEG 이미지로 반환합니다.",
     responses={
         200: {"content": {"image/jpeg": {}}},
         503: {"description": "카메라가 준비되지 않음"},
@@ -259,6 +322,57 @@ async def snapshot() -> Response:
     return Response(content=jpeg_bytes, media_type="image/jpeg")
 
 
+@app.get(
+    "/stream/face",
+    summary="얼굴 인식 MJPEG 실시간 스트림",
+    description=(
+        "OpenCV Haar Cascade로 얼굴을 검출하고 바운딩박스가 그려진 "
+        "컬러 MJPEG 스트림을 반환합니다."
+    ),
+    responses={
+        200: {"content": {"multipart/x-mixed-replace": {}}},
+        503: {"description": "카메라가 준비되지 않음"},
+    },
+)
+async def stream_face() -> StreamingResponse:
+    if camera is None:
+        raise HTTPException(status_code=503, detail="카메라가 준비되지 않았습니다.")
+    return StreamingResponse(
+        _mjpeg_face_generator(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.get(
+    "/snapshot/face",
+    summary="얼굴 인식 단일 프레임 스냅샷",
+    description=(
+        "현재 카메라 프레임에서 얼굴을 검출하고 바운딩박스가 그려진 "
+        "컬러 JPEG 이미지로 반환합니다."
+    ),
+    responses={
+        200: {"content": {"image/jpeg": {}}},
+        503: {"description": "카메라가 준비되지 않음"},
+    },
+)
+async def snapshot_face() -> Response:
+    if camera is None:
+        raise HTTPException(status_code=503, detail="카메라가 준비되지 않았습니다.")
+
+    loop = asyncio.get_running_loop()
+    try:
+        jpeg_bytes, face_count = await loop.run_in_executor(
+            None,
+            lambda: camera.capture_jpeg_with_faces(CAM_QUALITY),
+        )
+        logger.info("얼굴 인식 스냅샷: %d명 검출", face_count)
+    except Exception as exc:
+        logger.error("얼굴 인식 스냅샷 캡처 실패: %s", exc)
+        raise HTTPException(status_code=500, detail=f"캡처 실패: {exc}") from exc
+
+    return Response(content=jpeg_bytes, media_type="image/jpeg")
+
+
 # ---------------------------------------------------------------------------
 # 메인 진입점
 # ---------------------------------------------------------------------------
@@ -269,6 +383,5 @@ if __name__ == "__main__":
         host=SERVER_HOST,
         port=SERVER_PORT,
         log_level="info",
-        # reload=True 는 개발 시에만 사용 (Pi 에서는 False 권장)
         reload=False,
     )
